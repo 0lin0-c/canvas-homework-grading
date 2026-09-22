@@ -1,0 +1,43 @@
+{
+  "mode": "rehearsal",
+  "date": "2026-09-21",
+  "real_grades_written": 0,
+  "real_comments_written": 0,
+  "real_submission_scoring_performed": false,
+  "live_read_verified": [
+    "chrome_session_reuse",
+    "assignment_scope",
+    "official_answer_qr",
+    "official_relevant_pages_1_2_3",
+    "expired_preview_recovery",
+    "single_pdf_5_pages",
+    "two_attachment_switch",
+    "student_identity_switch",
+    "not_submitted_branch"
+  ],
+  "local_mock_cases_passed": 14,
+  "mock_completed_state_before_conflict": {
+    "student": "synthetic_B",
+    "grade": 98,
+    "comments": [
+      "演练扣分题号：6、7"
+    ],
+    "writes": 2,
+    "verified": true
+  },
+  "mock_final_state": {
+    "student": "synthetic_B",
+    "grade": 97,
+    "version": 2,
+    "writes": 3,
+    "overwrite_blocked": true,
+    "old_proposal_blocked": true
+  },
+  "real_writeback_verified": false,
+  "real_download_verified": false,
+  "real_grade_publication_verified": false,
+  "real_pdf_annotation_verified": false,
+  "qr_script_verified": true,
+  "next_live_gate": "First authorized real result must be saved and read back before batch writeback.",
+  "record_type": "historical_rehearsal_evidence"
+}

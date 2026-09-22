@@ -1,0 +1,34 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>批改流程本地演练台</title>
+<style>body{max-width:980px;margin:35px auto;font:16px/1.65 system-ui;color:#213547;background:#f5f7fa}section{background:white;padding:22px;border-radius:12px;margin:16px 0}button,select,input,textarea{font:inherit;margin:6px;padding:8px}textarea{width:90%;height:65px}button{cursor:pointer}pre{white-space:pre-wrap;background:#edf2f6;padding:12px}h1{font-size:25px}.notice{background:#fff0cb;padding:14px}label{display:block}</style>
+<h1>Canvas 批改流程 · 本地演练台</h1><p class="notice">仅有虚构样本。所有保存仅进入本浏览器 localhost 的 localStorage；不连接 Canvas，不代表真实平台的保存行为。</p>
+<section><label>虚构样本<select id="sample">
+<option value="ok">A：全部正确</option><option value="two">B：两道大题错误</option><option value="floor">C：七道大题错误</option><option value="blank">D：大量空题</option><option value="unreadable">E：无法辨认</option><option value="absent">F：未提交</option><option value="missing">G：少量漏题待定</option></select></label>
+<button id="propose">生成建议</button><p id="proposal" role="status">等待生成</p><pre id="evidence"></pre></section>
+<section><label>模拟评分<input id="grade" type="number" min="0" max="100"></label><label>模拟评语<textarea id="comment"></textarea></label>
+<button id="saveGrade">保存模拟分数</button><button id="saveComment">提交模拟评语</button><button id="verify">回读并核验</button><p id="result" role="status">未保存</p></section>
+<section><button id="repeat">重新运行检查</button><button id="manual">模拟人工改分为97</button><button id="newVersion">模拟新提交版本</button><p id="recovery"></p><h2>持久化状态（虚构）</h2><pre id="state"></pre></section>
+<script>
+const key='canvas-rehearsal-v1';
+const fixtures={ok:{errors:[]},two:{errors:[6,6,7]},floor:{errors:[1,2,6,7,8,10,11]},blank:{errors:[],review:'大量空题，没有获授权的低分阈值'},unreadable:{errors:[],review:'无法辨认，不能按错误处理'},absent:{errors:[],absent:true},missing:{errors:[],review:'少量漏题扣分规则未明确'}};
+const $=id=>document.getElementById(id);
+let db=JSON.parse(localStorage.getItem(key)||'{"platform":{},"ledger":{},"versions":{},"writes":0}');
+let draft=null;
+const id=()=>$('sample').value;
+const version=()=>db.versions[id()]||1;
+const platform=()=>db.platform[id()]||{grade:null,comments:[]};
+const fingerprint=()=>JSON.stringify({id:id(),version:version(),rules:'100-minus-unique-big-questions-floor95-v1'});
+function persist(){localStorage.setItem(key,JSON.stringify(db));render()}
+function render(){$('state').textContent=JSON.stringify(db,null,2);$('evidence').textContent=JSON.stringify({sample:id(),version:version(),...fixtures[id()]},null,2)}
+function inspect(){const r=db.ledger[id()];if(!r)return '尚无已核验记录';if(r.fingerprint!==fingerprint())return '新版本：需要重新读取并重新批准';if(JSON.stringify(platform())!==JSON.stringify(r.platform))return '冲突：检测到人工修改或其他变化，禁止覆盖';return '跳过：同版本结果已回读验证，不重复分数或评语'}
+function guard(){if(!draft||draft.fingerprint!==fingerprint())throw Error('没有当前版本的有效建议');const f=fixtures[id()];if(f.review||f.absent)throw Error('该样本不可自动评分');const p=platform();if(p.grade!==draft.expectedGrade||JSON.stringify(p.comments)!==JSON.stringify(draft.expectedComments))throw Error('平台状态变化，先复核');if(db.ledger[id()])throw Error(inspect())}
+function safely(fn){try{fn()}catch(e){$('result').textContent='已阻止：'+e.message}}
+$('sample').onchange=()=>{draft=null;$('grade').value='';$('comment').value='';$('proposal').textContent='等待生成';$('result').textContent='未保存';$('recovery').textContent='';render()};
+$('propose').onclick=()=>{const f=fixtures[id()];if(f.absent){draft=null;$('proposal').textContent='跳过：未提交，不生成0分';return}if(f.review){draft=null;$('proposal').textContent='待复核：'+f.review;return}const errors=[...new Set(f.errors)];const score=Math.max(95,100-errors.length);const p=platform();draft={fingerprint:fingerprint(),score,comment:errors.length?'演练扣分题号：'+errors.join('、'):'演练：全部正确',expectedGrade:p.grade,expectedComments:[...p.comments]};$('proposal').textContent='建议 '+score+' 分；错误大题 '+errors.length+' 道（同题多处错误去重）';$('grade').value=score;$('comment').value=draft.comment;render()};
+$('saveGrade').onclick=()=>safely(()=>{guard();const g=Number($('grade').value);if($('grade').value===''||g!==draft.score)throw Error('填写值与批准的模拟建议不一致');const p=platform();db.platform[id()]={grade:g,comments:[...p.comments]};db.writes++;draft.expectedGrade=g;persist();$('result').textContent='模拟分数已保存；评语尚需单独处理'});
+$('saveComment').onclick=()=>safely(()=>{guard();const text=$('comment').value;if(text!==draft.comment)throw Error('评语与模拟建议不一致');const p=platform();if(p.comments.includes(text)){$('result').textContent='评语已存在，跳过重复提交';return}p.comments.push(text);db.platform[id()]=p;db.writes++;draft.expectedComments=[...p.comments];persist();$('result').textContent='模拟评语已保存'});
+$('verify').onclick=()=>safely(()=>{if(!draft)throw Error('需先重新生成当前版本建议');const p=platform();if(p.grade!==draft.score||!p.comments.includes(draft.comment))throw Error('结果未完整持久化，不得标记完成');db.ledger[id()]={fingerprint:fingerprint(),platform:JSON.parse(JSON.stringify(p)),status:'verified'};persist();$('result').textContent='回读通过：分数和一条评语一致，已记录核验'});
+$('repeat').onclick=()=>{$('recovery').textContent=inspect();render()};
+$('manual').onclick=()=>{const p=platform();p.grade=97;db.platform[id()]=p;db.writes++;persist();$('recovery').textContent='已模拟人工修改，下一次应检测冲突'};
+$('newVersion').onclick=()=>{db.versions[id()]=version()+1;persist();$('recovery').textContent='已模拟新版本，旧建议失效'};
+render();
+</script></html>

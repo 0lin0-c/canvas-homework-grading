@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+.env.*
+!.env.example
+outputs/
+work/
+local/
+*.pdf
+*.zip
