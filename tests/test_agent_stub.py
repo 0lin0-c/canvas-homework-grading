@@ -26,7 +26,7 @@ def test_grade_student_stub_needs_review_no_full_score():
             workflow_state="submitted",
             submitted_at="2026-09-16T00:00:00Z",
             attachments=[
-                AttachmentMeta(id=1, filename="a.pdf", local_path="/tmp/a.pdf", size=10)
+                AttachmentMeta(id="1", filename="a.pdf", local_path="/tmp/a.pdf", size=10)
             ],
         ),
     )
