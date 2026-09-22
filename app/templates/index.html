@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Canvas 助教批改 V1</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <header class="top">
+    <h1>Canvas 助教批改 <span class="muted">V{{ version }}</span></h1>
+    <p class="muted">绑定 {{ host }}:{{ port }} · 写回门控 WRITEBACK_MAX_BATCH={{ writeback_max_batch }} · 评语对学生可见 · 不自动发布成绩</p>
+  </header>
+
+  <main class="grid">
+    <section class="card" id="vault">
+      <h2>1. Canvas 凭证</h2>
+      <p>状态：
+        {% if vault.present %}
+          <span class="ok">已保存</span> hint=<code>{{ vault.hint }}</code>
+          {% if vault.validated_at %}<span class="muted">@ {{ vault.validated_at }}</span>{% endif %}
+        {% else %}
+          <span class="warn">未配置</span>
+        {% endif %}
+      </p>
+      <form id="vault-form">
+        <label>Access Token（密码框，不会回显完整 token）
+          <input type="password" name="token" autocomplete="off" placeholder="粘贴 Canvas Access Token" required />
+        </label>
+        <div class="row">
+          <button type="submit">验证并保存</button>
+          <button type="button" id="vault-clear" class="secondary">清除凭证</button>
+        </div>
+      </form>
+      <p id="vault-msg" class="msg"></p>
+    </section>
+
+    <section class="card" id="answers">
+      <h2>2. 官方答案导入</h2>
+      <p class="muted">优先粘贴/上传官方答案文本；不依赖出版社登录墙。题库 PDF：
+        {% if question_bank.pdf_exists %}<span class="ok">已找到</span>{% else %}<span class="warn">未找到</span>{% endif %}
+        <code>{{ question_bank.pdf_configured }}</code>
+      </p>
+      <p class="muted">模型 API：{% if has_model_key %}<span class="ok">已配置</span>{% else %}<span class="warn">未配置 → 使用确定性规则引擎 + stub 多模态</span>{% endif %}</p>
+      <textarea id="answer-text" rows="6" placeholder="粘贴官方答案要点…&#10;测试指令可选：INCORRECT:6,7  MISSING:1,2  UNCERTAIN:15"></textarea>
+      <div class="row">
+        <button type="button" id="answer-save">保存答案文本</button>
+        <label class="file-btn">上传 .txt<input type="file" id="answer-file" accept=".txt,text/plain" hidden /></label>
+      </div>
+      <p id="answer-msg" class="msg"></p>
+    </section>
+
+    <section class="card" id="assignment">
+      <h2>3. 作业链接</h2>
+      <label>粘贴 oc.sjtu.edu.cn 作业 URL
+        <input type="url" id="assignment-url" placeholder="https://oc.sjtu.edu.cn/courses/94139/assignments/428317" value="https://oc.sjtu.edu.cn/courses/94139/assignments/428317" />
+      </label>
+      <div class="row">
+        <button type="button" id="btn-resolve">解析作业</button>
+        <button type="button" id="btn-create">拉取提交并创建 Run</button>
+        <label class="chk"><input type="checkbox" id="dl-att" /> 同时下载附件</label>
+      </div>
+      <pre id="resolve-out" class="out"></pre>
+      <p id="assign-msg" class="msg"></p>
+    </section>
+
+    <section class="card" id="runs">
+      <h2>最近 Runs</h2>
+      <ul class="run-list">
+        {% for r in runs %}
+        <li><a href="/runs/{{ r.id }}">{{ r.id }}</a> — {{ r.status }} · {{ r.student_count }} 人 · {{ r.created_at }}</li>
+        {% else %}
+        <li class="muted">暂无</li>
+        {% endfor %}
+      </ul>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>

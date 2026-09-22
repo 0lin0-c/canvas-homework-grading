@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Run {{ run.id }} · 助教复核</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <header class="top">
+    <p><a href="/">← 返回</a></p>
+    <h1>复核 · {{ run.assignment_name or run.assignment_id }}</h1>
+    <p class="muted">
+      run=<code>{{ run.id }}</code> · mode=<strong id="run-mode">{{ run.mode }}</strong> ·
+      course={{ run.course_id }} · assignment={{ run.assignment_id }} ·
+      rules={{ run.rules_version }} · WRITEBACK_MAX_BATCH={{ writeback_max_batch }}
+    </p>
+    <p class="warn">评语将作为 Canvas text comment 对学生可见；V1 不点击成绩发布。</p>
+  </header>
+
+  <section class="card toolbar">
+    <div class="row">
+      <button type="button" id="btn-grade">运行 Agent 批改</button>
+      <label>模式
+        <select id="mode-select">
+          <option value="suggest" {% if run.mode=='suggest' %}selected{% endif %}>suggest（不写 Canvas）</option>
+          <option value="writeback" {% if run.mode=='writeback' %}selected{% endif %}>writeback（真实写回）</option>
+          <option value="rehearsal" {% if run.mode=='rehearsal' %}selected{% endif %}>rehearsal</option>
+        </select>
+      </label>
+      <button type="button" id="btn-mode">切换模式</button>
+      <button type="button" id="btn-writeback" class="danger">确认写回选中（一点确认）</button>
+      <button type="button" id="btn-refresh" class="secondary">刷新</button>
+    </div>
+    <div class="row filters">
+      <label>筛选
+        <select id="filter">
+          <option value="all">全部</option>
+          <option value="submitted">已提交</option>
+          <option value="skipped">未提交</option>
+          <option value="needs_review">待复核</option>
+          <option value="proposed">可写回候选</option>
+          <option value="failed">写回失败</option>
+        </select>
+      </label>
+      <label class="chk"><input type="checkbox" id="check-all" /> 全选可见</label>
+    </div>
+    <p id="run-msg" class="msg"></p>
+  </section>
+
+  <section class="card">
+    <table class="students" id="students-table">
+      <thead>
+        <tr>
+          <th></th>
+          <th>学生</th>
+          <th>提交</th>
+          <th>建议分</th>
+          <th>终稿分</th>
+          <th>评语</th>
+          <th>置信度</th>
+          <th>状态</th>
+          <th>写回</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="students-body"></tbody>
+    </table>
+  </section>
+
+  <dialog id="detail-dlg">
+    <form method="dialog" class="detail">
+      <h3 id="dlg-title">学生详情</h3>
+      <pre id="dlg-meta" class="out"></pre>
+      <label>终稿分 <input type="number" id="dlg-score" step="1" /></label>
+      <label>终稿评语 <textarea id="dlg-comment" rows="3"></textarea></label>
+      <label class="chk"><input type="checkbox" id="dlg-force" /> 强制放行写回（needs_review）</label>
+      <div class="row">
+        <button type="button" id="dlg-save">保存终稿</button>
+        <button type="button" id="dlg-retry" class="secondary">重试写回本条</button>
+        <button value="cancel" class="secondary">关闭</button>
+      </div>
+      <p id="dlg-msg" class="msg"></p>
+      <input type="hidden" id="dlg-sid" />
+    </form>
+  </dialog>
+
+  <script>
+    window.RUN_ID = {{ run.id | tojson }};
+    window.RUN_DATA = {{ run.model_dump() | tojson }};
+    window.WRITEBACK_MAX_BATCH = {{ writeback_max_batch }};
+  </script>
+  <script src="/static/run.js"></script>
+</body>
+</html>
