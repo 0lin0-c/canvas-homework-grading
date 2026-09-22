@@ -1,7 +1,18 @@
 """Stub multimodal must not emit trusted/full proposed scores."""
+import re
+
 from app.agent import GradingAgent, stub_multimodal_grade
 from app.config import Settings
 from app.models import AnswerSource, AttachmentMeta, StudentResult, SubmissionMeta
+from app.writeback import can_writeback
+
+
+def _assert_neutral_comment(text: str) -> None:
+    assert text
+    assert not re.search(r"\bstub\b", text, re.I)
+    assert "needs_review" not in text
+    assert "参考答案缺失" not in text
+    assert "待助教复核" in text
 
 
 def test_stub_with_answers_and_paths_forces_uncertain():
@@ -45,3 +56,8 @@ def test_grade_student_stub_needs_review_no_full_score():
     assert out.proposed_score is None
     assert "stub_multimodal" in out.review_reasons
     assert out.final_score is None
+    _assert_neutral_comment(out.proposed_comment)
+    _assert_neutral_comment(out.final_comment or "")
+    ok, reason = can_writeback(out)
+    assert not ok
+    assert reason == "needs_review_blocked"

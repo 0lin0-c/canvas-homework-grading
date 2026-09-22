@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from app.comment_validation import split_answer_by_question
 from app.config import Settings, get_settings
 from app.scoring import QuestionResult
 
@@ -43,10 +44,20 @@ SYSTEM_PROMPT = """你是课程作业助教的多模态批改助手。对照官�
 - 没写该题用 missing；看不清或无法判断用 uncertain；明确做错用 incorrect；与官方答案一致或等价正确用 correct。
 - 必须覆盖题号列表中的每一题，不要增加列表外的题。
 - 只输出一个 JSON 对象，不要 Markdown。
+评语硬性规则（comment_draft，学生可见）：
+1. 助教口吻、简体中文；总篇幅 ≤800 字。
+2. 按题组织，格式必须以「第X题：」起行（X 为题号）；可多行，每题一段。
+3. status=incorrect 的题：两句以内，必须同时包含改正方向（错在哪类步骤或概念）以及该题正确结果或关键要点（可摘自官方答案，勿整段粘贴无关题）。
+4. 全对（所有题 correct）：可简短，如「全部正确，继续保持。」不必逐题展开。
+5. missing / uncertain：只提示「该题未作答或辨认不清，请助教复核」，不要编造正确解；此类通常整体 needs_review=true。
+6. 禁止出现（含子串）：参考答案缺失、答案库暂无、占位、略（单独作答内容时）、TODO、stub、needs_review、model_call_failed、待接入、内部复核标记原文等系统或工程话术。
+7. 禁止讽刺、挖苦；禁止提及其他学生姓名、学号或成绩；禁止输出密钥或 URL 令牌。
+8. 不要在评语里写分数、得分或扣几分（分数由服务端规则计算）。
 JSON 形状：
 {
   "questions": [{"number": 1, "status": "correct", "confidence": 0.0, "evidence": "页码或关键步骤"}],
-  "comment_draft": "给学生可见的简短评语草稿",
+  "comment_draft": "给学生可见的评语。错题以「第X题：」起行，并写明改正方向和正确要点。",
+  "question_comments": [{"number": 6, "text": "符号用反了，正确结果应为……"}],
   "overall_confidence": 0.0,
   "needs_review": false,
   "review_reasons": [],
@@ -57,6 +68,7 @@ JSON 形状：
     "attachments_fully_read": true
   }
 }
+question_comments 可选。若提供，每项只写该题给学生看的话，不要写分数。
 review_reasons 只用这些标记：low_confidence、unread_attachments、too_many_blank、unreadable、unrecognizable、suspected_wrong_chapter、few_missing_policy_unclear。
 """
 
@@ -123,8 +135,34 @@ def _reason_list(value: Any) -> list[str]:
     return out
 
 
+def _assemble_question_comments(raw: Any) -> str | None:
+    """Build 「第n题：text」 lines. None means the field is absent or not usable."""
+    if not isinstance(raw, list) or not raw:
+        return None
+    lines: list[str] = []
+    for item in raw:
+        if not isinstance(item, dict) or "number" not in item or "text" not in item:
+            return None
+        try:
+            number = int(item["number"])
+        except (TypeError, ValueError):
+            return None
+        text = item["text"]
+        if not isinstance(text, str) or not text.strip():
+            return None
+        body = text.strip()
+        body = re.sub(rf"^\s*第\s*{number}\s*题\s*[：:]\s*", "", body).strip()
+        if not body:
+            return None
+        lines.append(f"第{number}题：{body}")
+    return "\n".join(lines) if lines else None
+
+
 def parse_model_payload(raw: str, question_numbers: list[int]) -> VisionGrade:
-    """Validate the model JSON. Score-like fields are not read."""
+    """Validate the model JSON. Score-like fields are not read.
+
+    Optional question_comments, when well formed, replace comment_draft.
+    """
     data = _extract_json_object(raw)
     for key in REQUIRED_TOP:
         if key not in data:
@@ -169,11 +207,15 @@ def parse_model_payload(raw: str, question_numbers: list[int]) -> VisionGrade:
         raise ModelParseError("overall_confidence") from None
     if overall < 0 or overall > 1:
         raise ModelParseError("overall_confidence_range")
-    comment = data["comment_draft"]
-    if comment is None:
-        comment = ""
-    if not isinstance(comment, str):
-        raise ModelParseError("comment_draft")
+    assembled = _assemble_question_comments(data.get("question_comments"))
+    if assembled is not None:
+        comment = assembled
+    else:
+        comment = data["comment_draft"]
+        if comment is None:
+            comment = ""
+        if not isinstance(comment, str):
+            raise ModelParseError("comment_draft")
     flags = data.get("flags") or {}
     if not isinstance(flags, dict):
         raise ModelParseError("flags")
@@ -226,9 +268,13 @@ def build_user_text(
         "page_images": page_count,
         "attachments_fully_read": attachments_fully_read,
         "official_answer": answer_text,
+        "official_answer_by_question": split_answer_by_question(
+            answer_text, question_numbers
+        ),
     }
     return (
         "请根据随后的页面图片和下面的 JSON 元数据判断各大题。"
+        "对 incorrect 题，comment 必须含改正方向与官方正确要点；勿输出内部状态词。"
         "不要输出分数。\n"
         + json.dumps(payload, ensure_ascii=False)
     )

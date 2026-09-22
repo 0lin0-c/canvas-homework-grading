@@ -7,6 +7,11 @@ from typing import Any
 
 from app.agent import approved_result_hash
 from app.canvas_client import CanvasAPIError, CanvasAuthError, CanvasClient
+from app.comment_validation import (
+    is_placeholder_answer,
+    split_answer_by_question,
+    validate_student_comment,
+)
 from app.config import Settings, get_settings
 from app.models import PlatformSnapshot, StudentResult, WritebackItemResult
 
@@ -34,7 +39,15 @@ def grades_equal(a: Any, b: Any) -> bool:
         return na == nb
 
 
-def can_writeback(student: StudentResult, *, require_confirm_fields: bool = True) -> tuple[bool, str]:
+def can_writeback(
+    student: StudentResult,
+    *,
+    require_confirm_fields: bool = True,
+    answer_text: str | None = None,
+    answer_by_question: dict | None = None,
+    question_numbers: list[int] | None = None,
+    other_student_ids: list[str] | None = None,
+) -> tuple[bool, str]:
     if student.status == "skipped":
         return False, "skipped_not_submitted"
     if student.status == "complete":
@@ -46,8 +59,30 @@ def can_writeback(student: StudentResult, *, require_confirm_fields: bool = True
     score = student.effective_score()
     if score is None:
         return False, "no_final_score"
-    if require_confirm_fields and student.effective_comment() is None:
+    # Placeholder keys block writeback even when force_authorized is set.
+    if (
+        answer_text is not None
+        and str(answer_text).strip()
+        and is_placeholder_answer(str(answer_text), question_numbers)
+    ):
+        return False, "comment_validation:R_PLACEHOLDER_ANSWER"
+    comment = student.effective_comment()
+    if require_confirm_fields and not (comment or "").strip():
         return False, "no_comment"
+    # Comment rules are student-visible. force_authorized does not skip them.
+    if (comment or "").strip():
+        by_question = answer_by_question
+        if by_question is None and (answer_text or question_numbers):
+            by_question = split_answer_by_question(answer_text, question_numbers or [])
+        checked = validate_student_comment(
+            comment,
+            questions=student.questions,
+            answer_by_question=by_question,
+            other_student_ids=other_student_ids,
+        )
+        if not checked.ok:
+            rule_id = checked.rule_ids[0] if checked.rule_ids else "invalid"
+            return False, f"comment_validation:{rule_id}"
     return True, "ok"
 
 
@@ -68,6 +103,10 @@ class WritebackService:
         student: StudentResult,
         rules_version: str,
         dry_run: bool = False,
+        answer_text: str | None = None,
+        answer_by_question: dict | None = None,
+        question_numbers: list[int] | None = None,
+        other_student_ids: list[str] | None = None,
     ) -> WritebackItemResult:
         """
         Per-student pipeline (docs/03 + impl plan §4.4):
@@ -79,7 +118,13 @@ class WritebackService:
         6. Verify comment
         7. Mark complete
         """
-        ok, reason = can_writeback(student)
+        ok, reason = can_writeback(
+            student,
+            answer_text=answer_text,
+            answer_by_question=answer_by_question,
+            question_numbers=question_numbers,
+            other_student_ids=other_student_ids,
+        )
         if not ok:
             student.writeback_error = reason
             return WritebackItemResult(
@@ -328,6 +373,8 @@ class WritebackService:
         rules_version: str,
         confirm: bool,
         dry_run: bool = False,
+        answer_text: str | None = None,
+        question_numbers: list[int] | None = None,
     ) -> list[WritebackItemResult]:
         if not confirm:
             return [
@@ -355,6 +402,7 @@ class WritebackService:
 
         results: list[WritebackItemResult] = []
         by_id = {s.student_id: s for s in students}
+        by_question = split_answer_by_question(answer_text, question_numbers or [])
         for sid in student_ids:
             st = by_id.get(sid)
             if not st:
@@ -364,6 +412,7 @@ class WritebackService:
                     )
                 )
                 continue
+            others = [s.student_id for s in students if s.student_id != sid]
             results.append(
                 self.writeback_student(
                     course_id=course_id,
@@ -371,6 +420,10 @@ class WritebackService:
                     student=st,
                     rules_version=rules_version,
                     dry_run=dry_run,
+                    answer_text=answer_text,
+                    answer_by_question=by_question,
+                    question_numbers=question_numbers,
+                    other_student_ids=others,
                 )
             )
         return results

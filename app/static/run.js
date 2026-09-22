@@ -90,9 +90,16 @@ document.getElementById("dlg-save").addEventListener("click", async () => {
       method: "PATCH",
       body: JSON.stringify(body),
     });
+    const cv = updated.comment_validation || null;
+    if (cv) delete updated.comment_validation;
     const idx = RUN.students.findIndex((x) => x.student_id === sid);
     RUN.students[idx] = updated;
-    document.getElementById("dlg-msg").textContent = "已保存";
+    if (cv && cv.ok === false) {
+      const why = (cv.messages && cv.messages.length) ? cv.messages.join("；") : (cv.rule_ids || []).join("，");
+      document.getElementById("dlg-msg").textContent = "已保存。写回前需修改评语：" + why;
+    } else {
+      document.getElementById("dlg-msg").textContent = "已保存";
+    }
     render();
   } catch (err) {
     document.getElementById("dlg-msg").textContent = err.message;

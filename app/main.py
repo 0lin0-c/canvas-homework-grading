@@ -39,6 +39,11 @@ from app.models import (
     SubmissionMeta,
     WritebackIn,
 )
+from app.comment_validation import (
+    is_placeholder_answer,
+    split_answer_by_question,
+    validate_student_comment,
+)
 from app.question_bank import get_question_bank
 from app.scoring import RULES_VERSION
 from app.store import get_store, new_run_id
@@ -63,6 +68,32 @@ app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
 
 def _client() -> CanvasClient:
     return CanvasClient()
+
+
+def _writeback_answer_kwargs(run: GradingRun) -> dict[str, Any]:
+    return {
+        "answer_text": run.answer_source.imported_text,
+        "question_numbers": run.question_numbers,
+    }
+
+
+def _comment_validation_payload(run: GradingRun, student: StudentResult) -> dict[str, Any]:
+    checked = validate_student_comment(
+        student.effective_comment(),
+        questions=student.questions,
+        answer_by_question=split_answer_by_question(
+            run.answer_source.imported_text,
+            run.question_numbers,
+        ),
+        other_student_ids=[
+            other.student_id for other in run.students if other.student_id != student.student_id
+        ],
+    )
+    return {
+        "ok": checked.ok,
+        "rule_ids": checked.rule_ids,
+        "messages": checked.messages,
+    }
 
 
 def _question_numbers_for(course_id: int, assignment_id: int) -> list[int]:
@@ -268,7 +299,8 @@ def qb_import_answers(body: AnswerImportIn) -> dict[str, Any]:
         resource_url=body.resource_url,
         pages_read=body.pages_read,
     )
-    return {"ok": True, "answer_source": src.model_dump()}
+    warning = "placeholder_detected" if is_placeholder_answer(body.text) else None
+    return {"ok": True, "answer_source": src.model_dump(), "warning": warning}
 
 
 @app.post("/api/question-bank/answers/upload")
@@ -279,7 +311,8 @@ async def qb_upload_answers(
     raw = await file.read()
     text = raw.decode("utf-8", errors="replace")
     src = get_question_bank().import_answer_text(text, chapter=chapter)
-    return {"ok": True, "answer_source": src.model_dump()}
+    warning = "placeholder_detected" if is_placeholder_answer(text) else None
+    return {"ok": True, "answer_source": src.model_dump(), "warning": warning}
 
 
 # --------------- runs ---------------
@@ -411,6 +444,11 @@ def grade_run(run_id: str) -> dict[str, Any]:
     if imported:
         run.answer_source.imported_text = imported
         run.answer_source.source_type = "ta_import"
+    answer_text = run.answer_source.imported_text
+    if answer_text and str(answer_text).strip() and is_placeholder_answer(
+        answer_text, run.question_numbers
+    ):
+        raise HTTPException(status_code=400, detail="placeholder_answer_replace_required")
 
     agent = GradingAgent()
     run.students = agent.grade_run_students(
@@ -454,7 +492,9 @@ def patch_student(run_id: str, sid: str, body: StudentPatchIn) -> dict[str, Any]
     if body.status is not None:
         st.status = body.status
     store.save_run(run)
-    return st.model_dump()
+    payload = st.model_dump()
+    payload["comment_validation"] = _comment_validation_payload(run, st)
+    return payload
 
 
 @app.post("/api/runs/{run_id}/writeback")
@@ -481,6 +521,7 @@ def writeback_run(run_id: str, body: WritebackIn) -> dict[str, Any]:
             rules_version=run.rules_version,
             confirm=body.confirm,
             dry_run=True,
+            **_writeback_answer_kwargs(run),
         )
         store.save_run(run)
         return {
@@ -498,6 +539,7 @@ def writeback_run(run_id: str, body: WritebackIn) -> dict[str, Any]:
         rules_version=run.rules_version,
         confirm=body.confirm,
         dry_run=False,
+        **_writeback_answer_kwargs(run),
     )
     run.status = "writeback"
     store.save_run(run)
@@ -533,12 +575,15 @@ def writeback_retry(run_id: str, sid: str) -> dict[str, Any]:
     if not st:
         raise HTTPException(404, "student not found")
     svc = WritebackService()
+    others = [s.student_id for s in run.students if s.student_id != sid]
     result = svc.writeback_student(
         course_id=run.course_id,
         assignment_id=run.assignment_id,
         student=st,
         rules_version=run.rules_version,
         dry_run=False,
+        other_student_ids=others,
+        **_writeback_answer_kwargs(run),
     )
     store.save_run(run)
     return result.model_dump()

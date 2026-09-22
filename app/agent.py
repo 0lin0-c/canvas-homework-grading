@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from app.attachment_render import attachments_to_page_images
+from app.comment_validation import split_answer_by_question, validate_student_comment
 from app.config import Settings, get_settings
 from app.models import AnswerSource, QuestionItem, StudentResult
 from app.multimodal_client import (
@@ -107,9 +108,12 @@ _CLEAR_SCORE_TOKENS = {
     "unrecognizable",
     "suspected_wrong_chapter",
     "few_missing_policy_unclear",
+    "comment_failed_validation",
+    "placeholder_answer",
 }
 _STUB_TOKENS = {"stub_multimodal", "model_hook_unwired"}
-_STUB_COMMENT = "【待复核】未接入真实多模态批改（stub），请助教人工评分与评语。"
+# Student-visible. Must not contain stub / needs_review / other internal tokens.
+_NEUTRAL_REVIEW_COMMENT = "待助教复核后填写评语。"
 
 
 @dataclass
@@ -371,9 +375,13 @@ class GradingAgent:
             )
         draft = (graded.comment_draft or "").strip()
         if graded.real_success and draft:
-            base = outcome.proposed_comment or ""
-            if draft not in base:
-                outcome.proposed_comment = f"{base}\n{draft}".strip() if base else draft
+            if outcome.unique_incorrect:
+                # Student-facing text. A bare 「扣分题号」 line is not enough.
+                outcome.proposed_comment = draft
+            else:
+                base = outcome.proposed_comment or ""
+                if draft not in base:
+                    outcome.proposed_comment = f"{base}\n{draft}".strip() if base else draft
 
         for reason in graded.reasons:
             if reason not in outcome.review_reasons:
@@ -383,6 +391,21 @@ class GradingAgent:
         if _STUB_TOKENS.intersection(graded.reasons) and "stub_multimodal" not in outcome.review_reasons:
             outcome.review_reasons.append("stub_multimodal")
 
+        if _STUB_TOKENS.intersection(outcome.review_reasons) or (
+            "no_official_answer" in outcome.review_reasons
+        ):
+            outcome.proposed_comment = _NEUTRAL_REVIEW_COMMENT
+
+        # Pre-check only a score we might otherwise propose. Failure clears it.
+        if outcome.status == "proposed":
+            checked = validate_student_comment(
+                outcome.proposed_comment,
+                questions=graded.questions,
+                answer_by_question=split_answer_by_question(answer_text, question_numbers),
+            )
+            if not checked.ok:
+                _append_reason(outcome.review_reasons, "comment_failed_validation")
+
         # Stub tokens still force review. A real parse does not, unless §5 says so.
         must_clear = bool(_CLEAR_SCORE_TOKENS.intersection(outcome.review_reasons)) or (
             graded.model_needs_review
@@ -390,8 +413,8 @@ class GradingAgent:
         if must_clear or outcome.status == "needs_review":
             outcome.status = "needs_review"
             outcome.proposed_score = None
-        if _STUB_TOKENS.intersection(outcome.review_reasons):
-            outcome.proposed_comment = outcome.proposed_comment or _STUB_COMMENT
+        if outcome.status == "needs_review" and not (outcome.proposed_comment or "").strip():
+            outcome.proposed_comment = _NEUTRAL_REVIEW_COMMENT
 
         student.questions = [
             QuestionItem(

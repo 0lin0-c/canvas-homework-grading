@@ -1,5 +1,6 @@
 """Writeback / conflict state machine (docs/04 scenarios 8–14)."""
-from app.models import PlatformSnapshot, StudentResult, SubmissionMeta
+from app.config import Settings
+from app.models import PlatformSnapshot, QuestionItem, StudentResult, SubmissionMeta
 from app.writeback import WritebackService, can_writeback, grades_equal
 
 
@@ -105,8 +106,7 @@ def test_conflict_when_platform_grade_changed():
 
 
 def test_batch_gate_max_batch():
-    from app.config import Settings
-
+    assert Settings.model_fields["writeback_max_batch"].default == 1
     svc = WritebackService(settings=Settings(writeback_max_batch=1))
     students = [
         _student(student_id="1"),
@@ -137,6 +137,132 @@ def test_confirm_required():
         dry_run=True,
     )
     assert results[0].error == "confirm_required"
+
+
+def test_force_does_not_skip_forbidden_comment():
+    blocked = _student(
+        status="needs_review",
+        force_authorized=True,
+        final_score=96,
+        final_comment="参考答案缺失，这是 stub 标记 needs_review",
+        questions=[QuestionItem(number=1, status="correct")],
+    )
+    ok, reason = can_writeback(blocked)
+    assert not ok
+    assert reason == "comment_validation:R_FORBIDDEN_LEXICON"
+
+    without_force = _student(
+        status="needs_review",
+        force_authorized=False,
+        final_score=96,
+        final_comment="参考答案缺失",
+    )
+    ok, reason = can_writeback(without_force)
+    assert not ok
+    assert reason == "needs_review_blocked"
+
+
+def test_score_only_comment_not_writeback_ready():
+    student = _student(
+        questions=[
+            QuestionItem(number=6, status="incorrect"),
+            QuestionItem(number=7, status="correct"),
+        ]
+    )
+    ok, reason = can_writeback(student)
+    assert not ok
+    assert reason.startswith("comment_validation:")
+    assert reason != "comment_validation:R_NO_SCORE_TALK"
+
+
+def test_rewrite_comment_then_dry_run_completes():
+    svc = WritebackService()
+    student = _student(
+        status="needs_review",
+        force_authorized=True,
+        proposed_score=None,
+        final_score=99,
+        final_comment="第6题：错了",
+        questions=[QuestionItem(number=6, status="incorrect")],
+        platform_before=PlatformSnapshot(grade=None, comment_evidence=[]),
+    )
+    ok, reason = can_writeback(student)
+    assert not ok
+    assert reason == "comment_validation:R_CORRECT_POINT_HEURISTIC"
+
+    student.final_comment = "第6题：符号用反，正确应为 P(A∪B)=P(A)+P(B)-P(A∩B)。"
+    student.status = "proposed"
+    ok, reason = can_writeback(student)
+    assert ok, reason
+    result = svc.writeback_student(
+        course_id=1,
+        assignment_id=2,
+        student=student,
+        rules_version="v1",
+        dry_run=True,
+    )
+    assert result.ok
+    assert student.status == "complete"
+    assert "put_grade" in result.steps_done
+    assert "put_comment" in result.steps_done
+
+
+def test_validation_failure_does_not_call_canvas():
+    class FakeClient:
+        def get_submission(self, *args, **kwargs):
+            raise AssertionError("should not read canvas")
+
+        def put_grade(self, *args, **kwargs):
+            raise AssertionError("should not write grade")
+
+        def put_comment(self, *args, **kwargs):
+            raise AssertionError("should not write comment")
+
+    svc = WritebackService()
+    svc.client = FakeClient()  # type: ignore[assignment]
+    student = _student(
+        status="proposed",
+        force_authorized=True,
+        final_comment="第6题：错了",
+        questions=[QuestionItem(number=6, status="incorrect")],
+    )
+    result = svc.writeback_student(
+        course_id=1,
+        assignment_id=2,
+        student=student,
+        rules_version="v1",
+        dry_run=False,
+    )
+    assert not result.ok
+    assert result.error == "comment_validation:R_CORRECT_POINT_HEURISTIC"
+    assert student.status == "proposed"
+
+
+def test_batch_gate_still_rejects_two_ids():
+    svc = WritebackService(settings=Settings(writeback_max_batch=1))
+    students = [
+        _student(
+            student_id="1",
+            final_comment="stub",
+            questions=[QuestionItem(number=6, status="incorrect")],
+        ),
+        _student(
+            student_id="2",
+            final_comment="stub",
+            questions=[QuestionItem(number=6, status="incorrect")],
+        ),
+    ]
+    results = svc.writeback_batch(
+        course_id=1,
+        assignment_id=2,
+        students=students,
+        student_ids=["1", "2"],
+        rules_version="v1",
+        confirm=True,
+        dry_run=True,
+    )
+    assert len(results) == 2
+    assert all("WRITEBACK_MAX_BATCH=1" in (item.error or "") for item in results)
 
 
 def test_partial_resume_comment_only():

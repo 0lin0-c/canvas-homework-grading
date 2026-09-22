@@ -1,6 +1,7 @@
 """Qwen-VL wiring: vault/env key detection, mocked vision JSON, stub fallback."""
 import base64
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,13 @@ from app.agent import GradingAgent
 from app.attachment_render import attachments_to_page_images
 from app.config import Settings
 from app.models import AnswerSource, AttachmentMeta, CreateRunIn, StudentResult, SubmissionMeta
-from app.multimodal_client import ModelCallError, chat_completion_text, parse_model_payload
+from app.multimodal_client import (
+    SYSTEM_PROMPT,
+    ModelCallError,
+    build_user_text,
+    chat_completion_text,
+    parse_model_payload,
+)
 from app.vault import ModelKeyVault
 
 _PNG = base64.b64decode(
@@ -77,7 +84,7 @@ def _grade_payload(*, incorrect: int | None = 6, confidence: float = 0.95, needs
         "score": 60,
         "proposed_score": 10,
         "questions": questions,
-        "comment_draft": "第6题符号错误",
+        "comment_draft": "第6题：符号用反，正确应为42",
         "overall_confidence": confidence,
         "needs_review": needs_review,
         "review_reasons": [],
@@ -229,18 +236,22 @@ def test_mock_success_scores_from_rules_without_stub(tmp_path, monkeypatch):
     assert out.status == "proposed"
     assert out.proposed_score == 99
     assert out.final_score == 99
-    assert "扣分题号：6" in out.proposed_comment
-    assert "第6题符号错误" in out.proposed_comment
+    assert "第6题：符号用反，正确应为42" in out.proposed_comment
+    assert "comment_failed_validation" not in out.review_reasons
     assert "stub_multimodal" not in out.review_reasons
     assert "model_hook_unwired" not in out.review_reasons
     assert _FAKE_KEY not in json.dumps(out.model_dump(), ensure_ascii=False)
     assert captured["model"] == "qwen3.8-max"
     assert captured["base_url"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    blob = json.dumps(captured["messages"])
+    blob = json.dumps(captured["messages"], ensure_ascii=False)
     assert "image_url" in blob
     assert "data:image" in blob
     assert _FAKE_KEY not in blob
     assert "60" not in out.review_reasons
+    assert "第X题" in blob
+    assert "official_answer_by_question" in blob
+    assert "改正方向" in blob
+    assert "needs_review" in blob
 
 
 def test_model_needs_review_and_unreadable_clear_score(tmp_path, monkeypatch):
@@ -326,6 +337,8 @@ def test_model_call_failed_uses_stub_semantics(tmp_path, monkeypatch):
     assert out.proposed_score is None
     assert "model_call_failed" in out.review_reasons
     assert "stub_multimodal" in out.review_reasons
+    assert not re.search(r"\bstub\b", out.proposed_comment or "", re.I)
+    assert "needs_review" not in (out.proposed_comment or "")
     dumped = json.dumps(out.model_dump(), ensure_ascii=False)
     assert "sk-should-not-surface" not in dumped
     assert _FAKE_KEY not in dumped
@@ -364,6 +377,9 @@ def test_no_official_answer_skips_model_even_with_key(tmp_path, monkeypatch):
     assert out.proposed_score is None
     assert "no_official_answer" in out.review_reasons
     assert "stub_multimodal" in out.review_reasons
+    assert not re.search(r"\bstub\b", out.proposed_comment or "", re.I)
+    assert "needs_review" not in (out.proposed_comment or "")
+    assert "待助教复核" in (out.proposed_comment or "")
 
 
 def test_render_image_and_pdf(tmp_path):
@@ -424,6 +440,108 @@ def test_model_credential_api_hides_key(tmp_path, monkeypatch):
     after = client.get("/api/credentials/model")
     assert after.json()["present"] is False
     assert _FAKE_KEY not in after.text
+
+
+def test_parse_ignores_score_even_when_question_comments_present():
+    payload = _grade_payload()
+    payload["score"] = 87
+    payload["proposed_score"] = 87
+    payload["grade"] = 87
+    payload["question_comments"] = [
+        {"number": 6, "text": "符号用反了，正确结果应为42", "score": 0},
+        {"number": 1, "text": "第1题：这一问与答案一致"},
+    ]
+    parsed = parse_model_payload(json.dumps(payload), [1, 2, 6])
+    assert parsed.comment_draft == "第6题：符号用反了，正确结果应为42\n第1题：这一问与答案一致"
+    assert not hasattr(parsed, "score")
+    assert "87" not in parsed.comment_draft
+
+    fallback = _grade_payload()
+    fallback["question_comments"] = [{"number": "bad"}]
+    parsed_fallback = parse_model_payload(json.dumps(fallback), [1, 2, 6])
+    assert parsed_fallback.comment_draft == fallback["comment_draft"]
+
+
+def test_system_prompt_requires_student_visible_format():
+    assert "第X题" in SYSTEM_PROMPT
+    assert "800" in SYSTEM_PROMPT
+    assert "needs_review" in SYSTEM_PROMPT
+    assert "stub" in SYSTEM_PROMPT
+    text = build_user_text(
+        question_numbers=[6, 7],
+        answer_text="第6题\nP(A∪B)=P(A)+P(B)-P(A∩B)\n7、条件概率要先缩小样本空间\n",
+        student_id="42",
+        filenames=["a.png"],
+        page_count=1,
+        attachments_fully_read=True,
+    )
+    assert "改正方向" in text
+    assert "勿输出内部状态词" in text
+    assert "official_answer_by_question" in text
+    assert "P(A∪B)=P(A)+P(B)-P(A∩B)" in text
+    assert "不要输出分数" in text
+
+
+def test_incorrect_without_key_point_clears_proposed_score(tmp_path, monkeypatch):
+    image = tmp_path / "work.png"
+    _png(image)
+    payload = _grade_payload()
+    payload["comment_draft"] = "第6题：错了"
+    payload["score"] = 87
+    _patch_chat(monkeypatch, payload)
+    settings = _settings(tmp_path / "weak", model_api_key=_FAKE_KEY)
+    out = GradingAgent(settings).grade_student(
+        _student(image),
+        question_numbers=[1, 2, 6],
+        answer_source=AnswerSource(
+            imported_text="第6题\n正确结果为 P(A∪B)=P(A)+P(B)-P(A∩B)。这是正式要点。\n"
+        ),
+    )
+    assert out.status == "needs_review"
+    assert out.proposed_score is None
+    assert out.final_score is None
+    assert "comment_failed_validation" in out.review_reasons
+    assert "stub_multimodal" not in out.review_reasons
+    assert "87" not in str(out.proposed_score)
+
+
+def test_question_comments_keep_rule_score(tmp_path, monkeypatch):
+    image = tmp_path / "work.png"
+    _png(image)
+    payload = _grade_payload()
+    payload["score"] = 87
+    payload["question_comments"] = [
+        {"number": 6, "text": "符号用反了，正确应为42"},
+    ]
+    _patch_chat(monkeypatch, payload)
+    settings = _settings(tmp_path / "qc", model_api_key=_FAKE_KEY)
+    out = GradingAgent(settings).grade_student(
+        _student(image),
+        question_numbers=[1, 2, 6],
+        answer_source=AnswerSource(imported_text="第6题\n正确结果应为42，且过程要写全。\n"),
+    )
+    assert out.status == "proposed"
+    assert out.proposed_score == 99
+    assert out.final_score == 99
+    assert "第6题：符号用反了，正确应为42" in out.proposed_comment
+    assert "comment_failed_validation" not in out.review_reasons
+
+
+def test_bare_score_line_is_not_proposed(tmp_path, monkeypatch):
+    image = tmp_path / "work.png"
+    _png(image)
+    payload = _grade_payload()
+    payload["comment_draft"] = ""
+    _patch_chat(monkeypatch, payload)
+    settings = _settings(tmp_path / "bare", model_api_key=_FAKE_KEY)
+    out = GradingAgent(settings).grade_student(
+        _student(image),
+        question_numbers=[1, 2, 6],
+        answer_source=AnswerSource(imported_text="第6题\n正确结果应为42，过程写全即可。\n"),
+    )
+    assert out.status == "needs_review"
+    assert out.proposed_score is None
+    assert "comment_failed_validation" in out.review_reasons
 
 
 def test_index_model_key_field_and_download_default():
