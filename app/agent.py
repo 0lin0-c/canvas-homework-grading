@@ -26,66 +26,60 @@ def stub_multimodal_grade(
     student_id: str,
 ) -> tuple[list[QuestionResult], list[str]]:
     """
-    Stub multimodal hook when no model API key is present.
+    Stub multimodal hook when no real model is wired.
 
-    Heuristics (deterministic, for local/dev):
-    - No attachments → unreadable path handled by caller
-    - No official answers imported → all uncertain → needs_review
-    - If answer_text contains lines like "WRONG:6,7" for this student (test harness)
-      or global "INCORRECT:6,7" → mark those incorrect
-    - Else mark all correct with low-medium confidence and flag stub_mode
+    Hard rule (code review): stub MUST NOT emit trusted/full scores.
+    All questions are marked uncertain → caller forces needs_review.
+    Optional INCORRECT/MISSING/UNCERTAIN lines are only for local fixtures
+    and still do not authorize writeback-eligible proposed scores.
     """
-    reasons: list[str] = []
+    reasons: list[str] = ["stub_multimodal"]
     if not answer_text or not answer_text.strip():
+        reasons.append("no_official_answer")
         qs = [
             QuestionResult(
                 number=n,
                 status="uncertain",
-                evidence="no_official_answer_imported",
-                confidence=0.1,
+                evidence="stub:no_official_answer_imported",
+                confidence=0.05,
             )
             for n in question_numbers
         ]
-        return qs, ["no_official_answer", "stub_multimodal"]
-
-    incorrect: list[int] = []
-    missing: list[int] = []
-    uncertain: list[int] = []
-
-    # Test harness directives in answer paste
-    m = re.search(r"INCORRECT\s*:\s*([\d,\s]+)", answer_text, re.I)
-    if m:
-        incorrect = [int(x.strip()) for x in m.group(1).split(",") if x.strip().isdigit()]
-
-    m = re.search(r"MISSING\s*:\s*([\d,\s]+)", answer_text, re.I)
-    if m:
-        missing = [int(x.strip()) for x in m.group(1).split(",") if x.strip().isdigit()]
-
-    m = re.search(r"UNCERTAIN\s*:\s*([\d,\s]+)", answer_text, re.I)
-    if m:
-        uncertain = [int(x.strip()) for x in m.group(1).split(",") if x.strip().isdigit()]
-
-    # Per-student override: STUDENT <id> INCORRECT: ...
-    for line in answer_text.splitlines():
-        if student_id and student_id in line and re.search(r"INCORRECT\s*:", line, re.I):
-            m2 = re.search(r"INCORRECT\s*:\s*([\d,\s]+)", line, re.I)
-            if m2:
-                incorrect = [
-                    int(x.strip()) for x in m2.group(1).split(",") if x.strip().isdigit()
-                ]
+        return qs, reasons
 
     if not attachment_paths:
-        uncertain = list(question_numbers)
         reasons.append("no_attachment_pages")
 
-    qs = questions_from_incorrect_list(
-        question_numbers, incorrect, missing=missing, uncertain=uncertain
-    )
-    # Lower confidence in stub mode
-    for q in qs:
-        q.confidence = min(q.confidence, 0.55)
-        q.evidence = f"stub:{q.evidence}"
-    reasons.append("stub_multimodal")
+    # Never treat stub as having "read" the submission: all uncertain.
+    # Fixture directives may annotate evidence only; statuses stay uncertain.
+    qs = [
+        QuestionResult(
+            number=n,
+            status="uncertain",
+            evidence="stub:no_real_multimodal_read",
+            confidence=0.05,
+        )
+        for n in question_numbers
+    ]
+
+    # Preserve fixture hints in evidence for debugging (does not change status)
+    m = re.search(r"INCORRECT\s*:\s*([\d,\s]+)", answer_text or "", re.I)
+    if m:
+        hinted = {int(x.strip()) for x in m.group(1).split(",") if x.strip().isdigit()}
+        for q in qs:
+            if q.number in hinted:
+                q.evidence = "stub:fixture_hint_incorrect"
+    if student_id:
+        for line in (answer_text or "").splitlines():
+            if student_id in line and re.search(r"INCORRECT\s*:", line, re.I):
+                m2 = re.search(r"INCORRECT\s*:\s*([\d,\s]+)", line, re.I)
+                if m2:
+                    hinted = {
+                        int(x.strip()) for x in m2.group(1).split(",") if x.strip().isdigit()
+                    }
+                    for q in qs:
+                        if q.number in hinted:
+                            q.evidence = "stub:fixture_hint_incorrect"
     return qs, reasons
 
 
@@ -173,24 +167,27 @@ class GradingAgent:
             )
 
         outcome = evaluate_questions(qresults, submitted=True)
-        # Merge stub reasons that force review when no answers
-        if "no_official_answer" in extra_reasons and outcome.status == "proposed":
+
+        # Stub / unwired model must never produce writeback-eligible proposed scores.
+        force_review_tokens = {
+            "stub_multimodal",
+            "model_hook_unwired",
+            "no_official_answer",
+            "no_attachment_pages",
+        }
+        if force_review_tokens.intersection(extra_reasons) or "stub_multimodal" in extra_reasons:
             outcome.status = "needs_review"
             outcome.proposed_score = None
-            outcome.review_reasons = list(outcome.review_reasons) + ["no_official_answer"]
-
-        # Always note stub if used (does not alone block writeback if score exists
-        # and TA confirms — but high confidence sort uses overall_confidence)
+            outcome.proposed_comment = outcome.proposed_comment or (
+                "【待复核】未接入真实多模态批改（stub），请助教人工评分与评语。"
+            )
         for r in extra_reasons:
-            if r not in outcome.review_reasons and r in (
-                "no_official_answer",
-                "no_attachment_pages",
-            ):
-                if outcome.status != "needs_review" and r == "no_official_answer":
-                    outcome.status = "needs_review"
-                    outcome.proposed_score = None
-                if r not in outcome.review_reasons:
-                    outcome.review_reasons.append(r)
+            if r not in outcome.review_reasons:
+                outcome.review_reasons.append(r)
+        if "stub_multimodal" not in outcome.review_reasons and (
+            "stub_multimodal" in extra_reasons or "model_hook_unwired" in extra_reasons
+        ):
+            outcome.review_reasons.append("stub_multimodal")
 
         student.questions = [
             QuestionItem(
