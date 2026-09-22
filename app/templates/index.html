@@ -35,13 +35,42 @@
       <p id="vault-msg" class="msg"></p>
     </section>
 
+    <section class="card" id="model-key">
+      <h2>1b. 模型密钥（通义千问 VL）</h2>
+      <p>供应商 <code>{{ model_provider }}</code> · 模型 <code>{{ model_name }}</code></p>
+      <p>状态：
+        {% if model_vault.present %}
+          <span class="ok">已配置</span> hint=<code>{{ model_vault.hint }}</code>
+          {% if model_vault.validated_at %}<span class="muted">@ {{ model_vault.validated_at }}</span>{% endif %}
+        {% elif has_model_key %}
+          <span class="ok">环境变量已配置</span>
+        {% else %}
+          <span class="warn">未配置 → stub 多模态（建议分不可写回）</span>
+        {% endif %}
+      </p>
+      <form id="model-key-form">
+        <label>DashScope API Key（密码框，只保存 hint，不回显完整密钥）
+          <input type="password" name="api_key" autocomplete="off" placeholder="粘贴 DashScope API Key" required />
+        </label>
+        <div class="row">
+          <button type="submit">保存模型密钥</button>
+          <button type="button" id="model-key-clear" class="secondary">清除模型密钥</button>
+        </div>
+      </form>
+      <p id="model-key-msg" class="msg"></p>
+    </section>
+
     <section class="card" id="answers">
       <h2>2. 官方答案导入</h2>
       <p class="muted">优先粘贴/上传官方答案文本；不依赖出版社登录墙。题库 PDF：
         {% if question_bank.pdf_exists %}<span class="ok">已找到</span>{% else %}<span class="warn">未找到</span>{% endif %}
         <code>{{ question_bank.pdf_configured }}</code>
       </p>
-      <p class="muted">模型 API：{% if has_model_key %}<span class="ok">已配置</span>{% else %}<span class="warn">未配置 → 使用确定性规则引擎 + stub 多模态</span>{% endif %}</p>
+      <p class="muted">模型 <code>{{ model_provider }}</code> / <code>{{ model_name }}</code>：
+        {% if model_vault.present %}hint=<code>{{ model_vault.hint }}</code>
+        {% elif has_model_key %}<span class="ok">环境变量已配置</span>（页面不显示密钥）
+        {% else %}<span class="warn">未配置 → 确定性规则引擎 + stub 多模态</span>{% endif %}
+      </p>
       <textarea id="answer-text" rows="6" placeholder="粘贴官方答案要点…&#10;测试指令可选：INCORRECT:6,7  MISSING:1,2  UNCERTAIN:15"></textarea>
       <div class="row">
         <button type="button" id="answer-save">保存答案文本</button>
@@ -58,7 +87,7 @@
       <div class="row">
         <button type="button" id="btn-resolve">解析作业</button>
         <button type="button" id="btn-create">拉取提交并创建 Run</button>
-        <label class="chk"><input type="checkbox" id="dl-att" /> 同时下载附件</label>
+        <label class="chk"><input type="checkbox" id="dl-att" checked /> 同时下载附件</label>
       </div>
       <pre id="resolve-out" class="out"></pre>
       <p id="assign-msg" class="msg"></p>

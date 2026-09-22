@@ -1,19 +1,27 @@
-"""Agent grading worker: deterministic rule engine + stub multimodal hook."""
+"""Agent grading worker: deterministic rule engine + Qwen-VL multimodal hook."""
 from __future__ import annotations
 
 import hashlib
 import logging
 import re
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+from app.attachment_render import attachments_to_page_images
 from app.config import Settings, get_settings
 from app.models import AnswerSource, QuestionItem, StudentResult
+from app.multimodal_client import (
+    ModelParseError,
+    VisionGrade,
+    grade_images,
+)
 from app.scoring import (
     RULES_VERSION,
     QuestionResult,
     evaluate_questions,
-    questions_from_incorrect_list,
 )
+from app.vault import ModelKeyVault
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +91,87 @@ def stub_multimodal_grade(
     return qs, reasons
 
 
+# Tokens that force needs_review and clear proposed_score (delta §5).
+_CLEAR_SCORE_TOKENS = {
+    "stub_multimodal",
+    "model_hook_unwired",
+    "no_official_answer",
+    "no_attachment_pages",
+    "model_call_failed",
+    "model_parse_error",
+    "format_invalid",
+    "low_confidence",
+    "unread_attachments",
+    "too_many_blank",
+    "unreadable",
+    "unrecognizable",
+    "suspected_wrong_chapter",
+    "few_missing_policy_unclear",
+}
+_STUB_TOKENS = {"stub_multimodal", "model_hook_unwired"}
+_STUB_COMMENT = "【待复核】未接入真实多模态批改（stub），请助教人工评分与评语。"
+
+
+@dataclass
+class MultimodalOutcome:
+    questions: list[QuestionResult]
+    reasons: list[str]
+    comment_draft: str = ""
+    model_needs_review: bool = False
+    overall_confidence: float | None = None
+    flags: dict[str, Any] = field(default_factory=dict)
+    real_success: bool = False
+
+
+def _append_reason(reasons: list[str], token: str) -> None:
+    if token and token not in reasons:
+        reasons.append(token)
+
+
+def _uncertain(question_numbers: list[int], evidence: str) -> list[QuestionResult]:
+    return [
+        QuestionResult(number=n, status="uncertain", evidence=evidence, confidence=0.0)
+        for n in question_numbers
+    ]
+
+
+def _apply_model_flags(reasons: list[str], flags: dict[str, Any]) -> None:
+    if flags.get("too_many_blank") is True:
+        _append_reason(reasons, "too_many_blank")
+    if flags.get("unreadable") is True:
+        _append_reason(reasons, "unreadable")
+    if flags.get("wrong_chapter") is True:
+        _append_reason(reasons, "suspected_wrong_chapter")
+    if flags.get("attachments_fully_read") is False:
+        _append_reason(reasons, "unread_attachments")
+
+
+def _confidence_below_floor(vision: VisionGrade, floor: float) -> bool:
+    if vision.overall_confidence < floor:
+        return True
+    return any(q.confidence < floor for q in vision.questions)
+
+
+def _stub_outcome(
+    *,
+    question_numbers: list[int],
+    answer_text: str | None,
+    attachment_paths: list[str],
+    student_id: str,
+    extra: list[str] | None = None,
+) -> MultimodalOutcome:
+    questions, reasons = stub_multimodal_grade(
+        question_numbers=question_numbers,
+        answer_text=answer_text,
+        attachment_paths=attachment_paths,
+        student_id=student_id,
+    )
+    reasons = list(reasons)
+    for token in extra or []:
+        _append_reason(reasons, token)
+    return MultimodalOutcome(questions=questions, reasons=reasons, real_success=False)
+
+
 def multimodal_grade_with_model(
     *,
     question_numbers: list[int],
@@ -90,25 +179,114 @@ def multimodal_grade_with_model(
     attachment_paths: list[str],
     student_id: str,
     api_key: str,
-) -> tuple[list[QuestionResult], list[str]]:
+    settings: Settings | None = None,
+    download_incomplete: bool = False,
+) -> MultimodalOutcome:
+    """Call Qwen-VL (DashScope compatible-mode) and map JSON to QuestionResult.
+
+    On HTTP/SDK/timeout/empty failure, fall back to stub semantics plus
+    model_call_failed. A successful parse never includes stub_multimodal or
+    model_hook_unwired. Model score fields are ignored by the parser.
     """
-    Placeholder for real multimodal API.
-    Falls back to stub if not implemented / key unused.
-    """
-    # V1: no hard dependency on a specific provider; mark needs_review if we
-    # cannot call a model, but keep schema identical.
-    logger.info(
-        "Model key present but provider not wired; using stub for student=%s",
-        student_id,
+    settings = settings or get_settings()
+    if not answer_text or not answer_text.strip():
+        return _stub_outcome(
+            question_numbers=question_numbers,
+            answer_text=answer_text,
+            attachment_paths=attachment_paths,
+            student_id=student_id,
+        )
+    if not api_key or not str(api_key).strip():
+        return _stub_outcome(
+            question_numbers=question_numbers,
+            answer_text=answer_text,
+            attachment_paths=attachment_paths,
+            student_id=student_id,
+            extra=["model_call_failed"],
+        )
+
+    safe_id = re.sub(r"[^\w.\-]+", "_", student_id or "student")[:80] or "student"
+    work = settings.repo_root() / "work" / "page-images" / safe_id
+    try:
+        images, fully = attachments_to_page_images(
+            attachment_paths,
+            max_pages=int(settings.model_max_pages),
+            work_dir=work,
+        )
+    except Exception:
+        logger.warning("attachment render failed student=%s", student_id)
+        return _stub_outcome(
+            question_numbers=question_numbers,
+            answer_text=answer_text,
+            attachment_paths=attachment_paths,
+            student_id=student_id,
+            extra=["model_call_failed"],
+        )
+
+    reasons: list[str] = []
+    if not attachment_paths or not images:
+        _append_reason(reasons, "no_attachment_pages")
+        if download_incomplete or (bool(attachment_paths) and not fully):
+            _append_reason(reasons, "unread_attachments")
+        return MultimodalOutcome(
+            questions=_uncertain(question_numbers, "no_attachment_pages"),
+            reasons=reasons,
+            real_success=False,
+        )
+    if download_incomplete or not fully:
+        _append_reason(reasons, "unread_attachments")
+
+    try:
+        vision = grade_images(
+            api_key=api_key,
+            question_numbers=question_numbers,
+            answer_text=answer_text,
+            image_paths=images,
+            student_id=student_id,
+            attachment_names=[Path(p).name for p in attachment_paths],
+            attachments_fully_read=fully and not download_incomplete,
+            settings=settings,
+        )
+    except ModelParseError:
+        logger.warning("model JSON parse failed student=%s", student_id)
+        _append_reason(reasons, "model_parse_error")
+        _append_reason(reasons, "format_invalid")
+        return MultimodalOutcome(
+            questions=_uncertain(question_numbers, "model_parse_error"),
+            reasons=reasons,
+            real_success=False,
+        )
+    except Exception as exc:
+        logger.warning(
+            "model call failed student=%s err_type=%s",
+            student_id,
+            type(exc).__name__,
+        )
+        failed = _stub_outcome(
+            question_numbers=question_numbers,
+            answer_text=answer_text,
+            attachment_paths=attachment_paths,
+            student_id=student_id,
+            extra=["model_call_failed"],
+        )
+        for token in reasons:
+            _append_reason(failed.reasons, token)
+        return failed
+
+    for token in vision.review_reasons:
+        _append_reason(reasons, token)
+    _apply_model_flags(reasons, vision.flags)
+    if _confidence_below_floor(vision, float(settings.model_confidence_floor)):
+        _append_reason(reasons, "low_confidence")
+    return MultimodalOutcome(
+        questions=vision.questions,
+        reasons=reasons,
+        comment_draft=vision.comment_draft,
+        model_needs_review=bool(vision.needs_review),
+        overall_confidence=vision.overall_confidence,
+        flags=dict(vision.flags),
+        real_success=True,
     )
-    qs, reasons = stub_multimodal_grade(
-        question_numbers=question_numbers,
-        answer_text=answer_text,
-        attachment_paths=attachment_paths,
-        student_id=student_id,
-    )
-    reasons = list(reasons) + ["model_hook_unwired"]
-    return qs, reasons
 
 
 class GradingAgent:
@@ -147,47 +325,73 @@ class GradingAgent:
         paths = [
             a.local_path for a in student.submission.attachments if a.local_path
         ]
+        download_incomplete = any(
+            not a.local_path for a in student.submission.attachments
+        )
         answer_text = answer_source.imported_text
 
-        if self.settings.has_model_key:
-            key = self.settings.model_api_key or self.settings.openai_api_key or ""
-            qresults, extra_reasons = multimodal_grade_with_model(
+        # Vault (if readable) wins; otherwise env is seeded into an empty vault.
+        # Do not call the model when the official answer is missing.
+        key = ModelKeyVault(self.settings).get_key()
+        if key and answer_text and answer_text.strip():
+            graded = multimodal_grade_with_model(
                 question_numbers=question_numbers,
                 answer_text=answer_text,
                 attachment_paths=paths,
                 student_id=student.student_id,
                 api_key=key,
+                settings=self.settings,
+                download_incomplete=download_incomplete,
             )
         else:
-            qresults, extra_reasons = stub_multimodal_grade(
+            questions, extra_reasons = stub_multimodal_grade(
                 question_numbers=question_numbers,
                 answer_text=answer_text,
                 attachment_paths=paths,
                 student_id=student.student_id,
             )
+            graded = MultimodalOutcome(
+                questions=questions,
+                reasons=list(extra_reasons),
+                real_success=False,
+            )
+            if download_incomplete:
+                _append_reason(graded.reasons, "unread_attachments")
 
-        outcome = evaluate_questions(qresults, submitted=True)
+        flags = graded.flags
+        outcome = evaluate_questions(
+            graded.questions,
+            submitted=True,
+            unreadable=flags.get("unreadable") is True,
+            wrong_chapter=flags.get("wrong_chapter") is True and flags.get("unreadable") is not True,
+        )
+        if graded.real_success and graded.overall_confidence is not None:
+            outcome.overall_confidence = min(
+                outcome.overall_confidence, graded.overall_confidence
+            )
+        draft = (graded.comment_draft or "").strip()
+        if graded.real_success and draft:
+            base = outcome.proposed_comment or ""
+            if draft not in base:
+                outcome.proposed_comment = f"{base}\n{draft}".strip() if base else draft
 
-        # Stub / unwired model must never produce writeback-eligible proposed scores.
-        force_review_tokens = {
-            "stub_multimodal",
-            "model_hook_unwired",
-            "no_official_answer",
-            "no_attachment_pages",
-        }
-        if force_review_tokens.intersection(extra_reasons) or "stub_multimodal" in extra_reasons:
+        for reason in graded.reasons:
+            if reason not in outcome.review_reasons:
+                outcome.review_reasons.append(reason)
+        if flags.get("wrong_chapter") and "suspected_wrong_chapter" not in outcome.review_reasons:
+            outcome.review_reasons.append("suspected_wrong_chapter")
+        if _STUB_TOKENS.intersection(graded.reasons) and "stub_multimodal" not in outcome.review_reasons:
+            outcome.review_reasons.append("stub_multimodal")
+
+        # Stub tokens still force review. A real parse does not, unless §5 says so.
+        must_clear = bool(_CLEAR_SCORE_TOKENS.intersection(outcome.review_reasons)) or (
+            graded.model_needs_review
+        )
+        if must_clear or outcome.status == "needs_review":
             outcome.status = "needs_review"
             outcome.proposed_score = None
-            outcome.proposed_comment = outcome.proposed_comment or (
-                "【待复核】未接入真实多模态批改（stub），请助教人工评分与评语。"
-            )
-        for r in extra_reasons:
-            if r not in outcome.review_reasons:
-                outcome.review_reasons.append(r)
-        if "stub_multimodal" not in outcome.review_reasons and (
-            "stub_multimodal" in extra_reasons or "model_hook_unwired" in extra_reasons
-        ):
-            outcome.review_reasons.append("stub_multimodal")
+        if _STUB_TOKENS.intersection(outcome.review_reasons):
+            outcome.proposed_comment = outcome.proposed_comment or _STUB_COMMENT
 
         student.questions = [
             QuestionItem(
@@ -196,7 +400,7 @@ class GradingAgent:
                 evidence=q.evidence,
                 confidence=q.confidence,
             )
-            for q in qresults
+            for q in graded.questions
         ]
         student.proposed_score = outcome.proposed_score
         student.proposed_comment = outcome.proposed_comment

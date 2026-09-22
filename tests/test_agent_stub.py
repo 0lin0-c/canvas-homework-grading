@@ -16,7 +16,13 @@ def test_stub_with_answers_and_paths_forces_uncertain():
 
 
 def test_grade_student_stub_needs_review_no_full_score():
-    settings = Settings(model_api_key=None, openai_api_key=None)
+    # Force stub path: no env keys and no model vault file.
+    settings = Settings(
+        model_api_key=None,
+        openai_api_key=None,
+        dashscope_api_key=None,
+        model_vault_path="/tmp/canvas-grading-no-model-key.enc",
+    )
     agent = GradingAgent(settings)
     student = StudentResult(
         student_id="42",

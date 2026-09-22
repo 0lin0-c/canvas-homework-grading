@@ -29,6 +29,8 @@ from app.models import (
     CredentialIn,
     CredentialStatus,
     GradingRun,
+    ModelCredentialIn,
+    ModelCredentialStatus,
     PlatformSnapshot,
     ResolveAssignmentIn,
     ResolveAssignmentOut,
@@ -40,12 +42,14 @@ from app.models import (
 from app.question_bank import get_question_bank
 from app.scoring import RULES_VERSION
 from app.store import get_store, new_run_id
-from app.vault import get_vault
+from app.vault import get_model_vault, get_vault
 from app.writeback import WritebackService, can_writeback
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 # Redact Authorization in uvicorn access if present
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("openai").setLevel(logging.CRITICAL)
 
 app = FastAPI(title="Canvas TA Grading V1", version=__version__)
 settings = get_settings()
@@ -76,6 +80,7 @@ def _question_numbers_for(course_id: int, assignment_id: int) -> list[int]:
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
     vault_status = get_vault().status()
+    model_status = get_model_vault().status()
     qb = get_question_bank().status()
     runs = get_store().list_runs(20)
     return templates.TemplateResponse(
@@ -83,6 +88,9 @@ async def index(request: Request) -> HTMLResponse:
         "index.html",
         {
             "vault": vault_status,
+            "model_vault": model_status,
+            "model_provider": settings.model_provider,
+            "model_name": settings.model_name,
             "question_bank": qb,
             "runs": runs,
             "writeback_max_batch": settings.writeback_max_batch,
@@ -174,6 +182,36 @@ def credentials_save(body: CredentialIn) -> CredentialStatus:
 @app.delete("/api/credentials")
 def credentials_clear() -> dict[str, bool]:
     get_vault().clear()
+    return {"cleared": True}
+
+
+def _model_status() -> ModelCredentialStatus:
+    st = get_model_vault().status()
+    return ModelCredentialStatus(
+        present=bool(st.get("present")),
+        hint=st.get("hint"),
+        validated_at=st.get("validated_at"),
+    )
+
+
+@app.get("/api/credentials/model", response_model=ModelCredentialStatus)
+def model_credentials_status() -> ModelCredentialStatus:
+    return _model_status()
+
+
+@app.post("/api/credentials/model", response_model=ModelCredentialStatus)
+def model_credentials_save(body: ModelCredentialIn) -> ModelCredentialStatus:
+    api_key = body.api_key.strip()
+    if not api_key:
+        raise HTTPException(400, "empty api_key")
+    # Persist only. Do not echo the key or call the provider (avoids logging it).
+    get_model_vault().save(api_key)
+    return _model_status()
+
+
+@app.delete("/api/credentials/model")
+def model_credentials_clear() -> dict[str, bool]:
+    get_model_vault().clear()
     return {"cleared": True}
 
 

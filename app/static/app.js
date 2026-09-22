@@ -40,6 +40,32 @@ if (vaultForm) {
   });
 }
 
+const modelKeyForm = document.getElementById("model-key-form");
+if (modelKeyForm) {
+  modelKeyForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const msg = document.getElementById("model-key-msg");
+    const apiKey = new FormData(modelKeyForm).get("api_key");
+    msg.textContent = "保存中…";
+    try {
+      const st = await api("/api/credentials/model", {
+        method: "POST",
+        body: JSON.stringify({ api_key: apiKey }),
+      });
+      msg.textContent = st.present ? `已保存（${st.hint}）` : "已保存";
+      modelKeyForm.reset();
+      location.reload();
+    } catch (err) {
+      msg.textContent = "失败：" + err.message;
+    }
+  });
+  document.getElementById("model-key-clear").addEventListener("click", async () => {
+    await api("/api/credentials/model", { method: "DELETE" });
+    document.getElementById("model-key-msg").textContent = "已清除";
+    location.reload();
+  });
+}
+
 const answerSave = document.getElementById("answer-save");
 if (answerSave) {
   answerSave.addEventListener("click", async () => {

@@ -141,6 +141,18 @@ class CredentialStatus(BaseModel):
     user_name: str | None = None
 
 
+class ModelCredentialIn(BaseModel):
+    api_key: str
+
+
+class ModelCredentialStatus(BaseModel):
+    """Public model-key status. Never includes the key itself."""
+
+    present: bool
+    hint: str | None = None
+    validated_at: str | None = None
+
+
 class ResolveAssignmentIn(BaseModel):
     url: str
 
@@ -160,7 +172,7 @@ class CreateRunIn(BaseModel):
     mode: Mode = "suggest"
     question_numbers: list[int] | None = None
     answer_text: str | None = None
-    download_attachments: bool = False
+    download_attachments: bool = True
 
 
 class AnswerImportIn(BaseModel):
