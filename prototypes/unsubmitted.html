@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>未提交作业 · Canvas 提醒</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f6f8fc;color:#17293e;font:14px/1.65 system-ui,"Microsoft YaHei",sans-serif}main{max-width:900px;margin:32px auto;padding:0 20px}a{color:#2053b7}h1{font-size:25px;margin:18px 0 4px}h2{font-size:17px;margin:0 0 12px}.muted{color:#65748a}.panel{background:white;border:1px solid #d9e2ed;border-radius:12px;padding:22px;margin:18px 0}.row{display:flex;justify-content:space-between;gap:16px;align-items:center}.list{max-height:420px;overflow:auto}.student{display:block;padding:9px 0;border-bottom:1px solid #e8edf4}.student:last-child{border:0}input[type=checkbox]{margin-right:9px}button{font:inherit;cursor:pointer;padding:10px 17px;border:1px solid #cbd5df;border-radius:7px;background:white}button.primary{background:#2455bc;color:white;border-color:#2455bc}button:disabled{opacity:.5;cursor:default}pre{white-space:pre-wrap;background:#f6f8fc;border:1px solid #e2e8f1;border-radius:7px;padding:14px;font:inherit}#error{color:#b34238}#success{color:#16643b}[hidden]{display:none!important}
+</style>
+</head>
+<body><main>
+<a href="review-workbench.html">← 返回作业复核</a>
+<h1>未提交作业</h1>
+<p id="summary" class="muted">正在读取 Canvas 当前提交状态…</p>
+<p id="error" role="alert"></p>
+<div id="content" hidden>
+<section class="panel"><div class="row"><h2>未提交的同学</h2><label><input id="selectAll" type="checkbox" checked>全选</label></div><div id="students" class="list"></div></section>
+<section class="panel"><h2>Canvas 收件箱提醒</h2>
+<p class="muted">每位所选同学会收到单独的 Canvas 收件箱消息。是否同时收到电子邮件取决于各自的 Canvas 通知设置。</p>
+<pre id="preview"></pre><button id="send" class="primary" type="button">发送给所选同学</button>
+<p id="success" role="status"></p></section>
+</div>
+</main><script src="unsubmitted.js"></script></body></html>
